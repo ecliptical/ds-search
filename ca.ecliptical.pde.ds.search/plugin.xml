@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+   <extension
+         point="org.eclipse.jdt.ui.queryParticipants">
+      <queryParticipant
+            class="ca.ecliptical.pde.ds.search.DescriptorQueryParticipant"
+            id="ca.ecliptical.pde.ds.search.DescriptorQueryParticipant"
+            name="%queryParticipant.name"
+            nature="org.eclipse.pde.PluginNature">
+      </queryParticipant>
+   </extension>
+
+</plugin>
