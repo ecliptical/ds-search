@@ -455,21 +455,21 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 						String bind = reference.getReferenceBind();
 						if (bind != null) {
-							IMethod bindMethod = findReferenceMethod(implClassType, bind, refIface, monitor);
+							IMethod bindMethod = findBindMethod(implClassType, bind, refIface, monitor);
 							if (matches(searchElement, searchPattern, bindMethod))
 								reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_BIND), file);
 						}
 
 						String unbind = reference.getReferenceUnbind();
 						if (unbind != null) {
-							IMethod unbindMethod = findReferenceMethod(implClassType, unbind, refIface, monitor);
+							IMethod unbindMethod = findBindMethod(implClassType, unbind, refIface, monitor);
 							if (matches(searchElement, searchPattern, unbindMethod))
 								reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_UNBIND), file);
 						}
 
 						String updated = reference.getXMLAttributeValue("updated"); //$NON-NLS-1$
 						if (updated != null) {
-							IMethod updatedMethod = findReferenceMethod(implClassType, updated, refIface, monitor);
+							IMethod updatedMethod = findUpdatedMethod(implClassType, updated, monitor);
 							if (matches(searchElement, searchPattern, updatedMethod))
 								reportMatch(requestor, reference.getDocumentAttribute("updated"), file); //$NON-NLS-1$
 						}
@@ -484,7 +484,6 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 	private IMethod findActivateMethod(IType implClassType, String name, IProgressMonitor monitor) throws JavaModelException {
 		IMethod candidate = null;
 		int priority = Integer.MAX_VALUE;
-		boolean first = true;
 
 		IType type = implClassType;
 		while (type != null) {
@@ -495,13 +494,13 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				if (!VOID_SIG.equals(method.getReturnType()))
 					continue;
 
-				if (!first
+				if (type != implClassType
 						&& (Flags.isPrivate(method.getFlags())
 								|| (Flags.isPackageDefault(method.getFlags())
 										&& !implClassType.getPackageFragment().equals(method.getDeclaringType().getPackageFragment()))))
 					continue;
 
-				String[] paramSigs = resolveParameterTypes(method);
+				String[] paramSigs = resolveParameterTypes(method, Integer.MAX_VALUE);
 
 				if (paramSigs.length == 1 && COMPONENT_CONTEXT_SIG.equals(paramSigs[0])) {
 					// best match
@@ -546,8 +545,6 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				}
 			}
 
-			first = false;
-
 			type = findSuperclassType(type, implClassType.getJavaProject(), monitor);
 		}
 
@@ -573,7 +570,6 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 	private IMethod findDeactivateMethod(IType implClassType, String name, IProgressMonitor monitor) throws JavaModelException {
 		IMethod candidate = null;
 		int priority = Integer.MAX_VALUE;
-		boolean first = true;
 
 		IType type = implClassType;
 		while (type != null) {
@@ -584,13 +580,13 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				if (!VOID_SIG.equals(method.getReturnType()))
 					continue;
 
-				if (!first
+				if (type != implClassType
 						&& (Flags.isPrivate(method.getFlags())
 								|| (Flags.isPackageDefault(method.getFlags())
 										&& !implClassType.getPackageFragment().equals(method.getDeclaringType().getPackageFragment()))))
 					continue;
 
-				String[] paramSigs = resolveParameterTypes(method);
+				String[] paramSigs = resolveParameterTypes(method, Integer.MAX_VALUE);
 
 				if (paramSigs.length == 1 && COMPONENT_CONTEXT_SIG.equals(paramSigs[0])) {
 					// best match
@@ -649,18 +645,15 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				}
 			}
 
-			first = false;
-
 			type = findSuperclassType(type, implClassType.getJavaProject(), monitor);
 		}
 
 		return candidate;
 	}
 
-	private IMethod findReferenceMethod(IType implClassType, String name, String referenceTypeName, IProgressMonitor monitor) throws JavaModelException {
+	private IMethod findBindMethod(IType implClassType, String name, String referenceTypeName, IProgressMonitor monitor) throws JavaModelException {
 		IMethod candidate = null;
 		int priority = Integer.MAX_VALUE;
-		boolean first = true;
 
 		String referenceTypeSig = Signature.createTypeSignature(referenceTypeName, true);
 		IType referenceType = null;
@@ -675,13 +668,13 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				if (!VOID_SIG.equals(method.getReturnType()))
 					continue;
 
-				if (!first
+				if (type != implClassType
 						&& (Flags.isPrivate(method.getFlags())
 								|| (Flags.isPackageDefault(method.getFlags())
 										&& !implClassType.getPackageFragment().equals(method.getDeclaringType().getPackageFragment()))))
 					continue;
 
-				String[] paramSigs = resolveParameterTypes(method);
+				String[] paramSigs = resolveParameterTypes(method, 2);
 
 				if (paramSigs.length == 1 && SERVICE_REFERENCE_SIG.equals(paramSigs[0])) {
 					// best match
@@ -731,7 +724,44 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				}
 			}
 
-			first = false;
+			type = findSuperclassType(type, implClassType.getJavaProject(), monitor);
+		}
+
+		return candidate;
+	}
+
+	private IMethod findUpdatedMethod(IType implClassType, String name, IProgressMonitor monitor) throws JavaModelException {
+		IMethod candidate = null;
+
+		IType type = implClassType;
+		while (type != null) {
+			for (IMethod method : type.getMethods()) {
+				if (!name.equals(method.getElementName()))
+					continue;
+
+				if (!VOID_SIG.equals(method.getReturnType()))
+					continue;
+
+				if (type != implClassType
+						&& (Flags.isPrivate(method.getFlags())
+								|| (Flags.isPackageDefault(method.getFlags())
+										&& !implClassType.getPackageFragment().equals(method.getDeclaringType().getPackageFragment()))))
+					continue;
+
+				String[] paramSigs = resolveParameterTypes(method, 1);
+
+				if (paramSigs.length != 1)
+					continue;
+
+				if (SERVICE_REFERENCE_SIG.equals(paramSigs[0])) {
+					// best match
+					return method;
+				}
+
+				if (candidate == null && MAP_SIG.equals(paramSigs[0])) {
+					candidate = method;
+				}
+			}
 
 			type = findSuperclassType(type, implClassType.getJavaProject(), monitor);
 		}
@@ -739,10 +769,10 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 		return candidate;
 	}
 
-	private String[] resolveParameterTypes(IMethod method) throws JavaModelException {
+	private String[] resolveParameterTypes(IMethod method, int maxParams) throws JavaModelException {
 		String[] paramSigs = method.getParameterTypes();
 		paramSigs = Arrays.copyOf(method.getParameterTypes(), paramSigs.length);
-		for (int i = 0; i < paramSigs.length; ++i) {
+		for (int i = 0, n = Math.min(paramSigs.length, maxParams); i < n; ++i) {
 			paramSigs[i] = Signature.getTypeErasure(paramSigs[i]);
 			if (!method.isResolved()) {
 				String[][] resolvedParamTypes = method.getDeclaringType().resolveType(Signature.toString(paramSigs[i]));
