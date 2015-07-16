@@ -12,6 +12,7 @@ package ca.ecliptical.pde.ds.search;
 
 import org.eclipse.osgi.service.debug.DebugOptions;
 import org.eclipse.osgi.service.debug.DebugTrace;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
@@ -30,17 +31,20 @@ public class Debug {
 		if (!name.startsWith("/")) //$NON-NLS-1$
 			name = "/" + name; //$NON-NLS-1$
 
-		BundleContext ctx = Activator.getDefault().getBundle().getBundleContext();
-		ServiceReference<DebugOptions> ref = ctx.getServiceReference(DebugOptions.class);
-		DebugOptions options = null;
 		DebugTrace trace = null;
-		if (ref != null) {
-			options = ctx.getService(ref);
-			if (options.isDebugEnabled() && options.getBooleanOption(Activator.PLUGIN_ID + name, false)) {
-				trace = options.newDebugTrace(Activator.PLUGIN_ID);
-			}
+		Activator activator = Activator.getDefault();
+		Bundle bundle;
+		BundleContext ctx;
+		if (activator != null && (bundle = activator.getBundle()) != null && (ctx = bundle.getBundleContext()) != null) {
+			ServiceReference<DebugOptions> ref = ctx.getServiceReference(DebugOptions.class);
+			if (ref != null) {
+				DebugOptions options = ctx.getService(ref);
+				if (options.isDebugEnabled() && options.getBooleanOption(Activator.PLUGIN_ID + name, false)) {
+					trace = options.newDebugTrace(Activator.PLUGIN_ID);
+				}
 
-			ctx.ungetService(ref);
+				ctx.ungetService(ref);
+			}
 		}
 
 		return new Debug(trace, name);

@@ -11,17 +11,24 @@
 package ca.ecliptical.pde.ds.search;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileFilter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.IResourceVisitor;
+import org.eclipse.core.resources.IStorage;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -31,9 +38,12 @@ import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.SubProgressMonitor;
 import org.eclipse.jdt.core.Flags;
+import org.eclipse.jdt.core.IClasspathEntry;
+import org.eclipse.jdt.core.IJarEntryResource;
 import org.eclipse.jdt.core.IJavaElement;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.core.IMethod;
+import org.eclipse.jdt.core.IPackageFragmentRoot;
 import org.eclipse.jdt.core.IType;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
@@ -47,17 +57,19 @@ import org.eclipse.jdt.ui.search.ISearchRequestor;
 import org.eclipse.jdt.ui.search.PatternQuerySpecification;
 import org.eclipse.jdt.ui.search.QuerySpecification;
 import org.eclipse.jface.text.Document;
+import org.eclipse.osgi.service.resolver.BundleDescription;
 import org.eclipse.pde.core.IBaseModel;
 import org.eclipse.pde.core.plugin.IPluginModelBase;
 import org.eclipse.pde.core.plugin.PluginRegistry;
-import org.eclipse.pde.internal.core.bundle.WorkspaceBundleFragmentModel;
-import org.eclipse.pde.internal.core.bundle.WorkspaceBundlePluginModel;
-import org.eclipse.pde.internal.core.bundle.WorkspaceBundlePluginModelBase;
+import org.eclipse.pde.internal.core.ClasspathUtilCore;
+import org.eclipse.pde.internal.core.PDECore;
+import org.eclipse.pde.internal.core.SearchablePluginsManager;
 import org.eclipse.pde.internal.core.ibundle.IBundleModel;
 import org.eclipse.pde.internal.core.ibundle.IBundlePluginModelBase;
 import org.eclipse.pde.internal.core.project.PDEProject;
 import org.eclipse.pde.internal.core.text.IDocumentAttributeNode;
 import org.eclipse.pde.internal.core.text.IDocumentElementNode;
+import org.eclipse.pde.internal.core.util.ManifestUtils;
 import org.eclipse.pde.internal.ds.core.IDSComponent;
 import org.eclipse.pde.internal.ds.core.IDSConstants;
 import org.eclipse.pde.internal.ds.core.IDSImplementation;
@@ -156,8 +168,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 		HashSet<IPath> scope = new HashSet<IPath>();
 		for (IPath path : query.getScope().enclosingProjectsAndJars()) {
-			if (path.isAbsolute() && path.segmentCount() == 1)
-				scope.add(path);
+			scope.add(path);
 		}
 
 		if (scope.isEmpty())
@@ -166,10 +177,12 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 		this.requestor = requestor;
 
 		// look through all active bundles
-		IPluginModelBase[] models = PluginRegistry.getWorkspaceModels();
-		monitor.beginTask(Messages.DescriptorQueryParticipant_taskName, models.length);
+		IPluginModelBase[] wsModels = PluginRegistry.getWorkspaceModels();
+		IPluginModelBase[] exModels = PluginRegistry.getExternalModels();
+		monitor.beginTask(Messages.DescriptorQueryParticipant_taskName, wsModels.length + exModels.length);
 		try {
-			for (IPluginModelBase model : models) {
+			// workspace models
+			for (IPluginModelBase model : wsModels) {
 				if (monitor.isCanceled())
 					throw new OperationCanceledException();
 
@@ -191,7 +204,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				}
 
 				// we can only search in Java bundle projects (for now)
-				if (!project.hasNature(JavaCore.NATURE_ID) ) {
+				if (!project.hasNature(JavaCore.NATURE_ID)) {
 					monitor.worked(1);
 					if (debug.isDebugging())
 						debug.trace(String.format("Non-Java project: %s", project.getName())); //$NON-NLS-1$
@@ -206,6 +219,58 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 							searchBundle((IBundlePluginModelBase) model, monitor);
 					}
 				}, new SubProgressMonitor(monitor, 1));
+			}
+
+			// external models
+			SearchablePluginsManager spm = PDECore.getDefault().getSearchablePluginsManager();
+			IJavaProject javaProject = spm.getProxyProject();
+			if (javaProject == null || !javaProject.exists() || !javaProject.isOpen()) {
+				monitor.worked(exModels.length);
+				if (debug.isDebugging())
+					debug.trace("External Plug-in Search project inaccessible!"); //$NON-NLS-1$
+
+				return;
+			}
+
+			for (IPluginModelBase model : exModels) {
+				if (monitor.isCanceled())
+					throw new OperationCanceledException();
+
+				BundleDescription bd;
+				if (!model.isEnabled() || (bd = model.getBundleDescription()) == null) {
+					monitor.worked(1);
+					if (debug.isDebugging())
+						debug.trace(String.format("Non-bundle model: %s", model)); //$NON-NLS-1$
+
+					continue;
+				}
+
+				// check scope
+				ArrayList<IClasspathEntry> cpEntries = new ArrayList<IClasspathEntry>();
+				ClasspathUtilCore.addLibraries(model, cpEntries);
+				ArrayList<IPath> cpEntryPaths = new ArrayList<IPath>(cpEntries.size());
+				for (IClasspathEntry cpEntry : cpEntries) {
+					cpEntryPaths.add(cpEntry.getPath());
+				}
+
+				cpEntryPaths.retainAll(scope);
+				if (cpEntryPaths.isEmpty()) {
+					monitor.worked(1);
+					if (debug.isDebugging())
+						debug.trace(String.format("External bundle out of scope: %s", model.getInstallLocation())); //$NON-NLS-1$
+
+					continue;
+				}
+
+				if (!spm.isInJavaSearch(bd.getSymbolicName())) {
+					monitor.worked(1);
+					if (debug.isDebugging())
+						debug.trace(String.format("Non-searchable external model: %s", bd.getSymbolicName())); //$NON-NLS-1$
+
+					continue;
+				}
+
+				searchBundle(model, javaProject, new SubProgressMonitor(monitor, 1));
 			}
 		} finally {
 			monitor.done();
@@ -231,24 +296,16 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 			return;
 		}
 
-		IProject project = model.getUnderlyingResource().getProject();
-
-		WorkspaceBundlePluginModelBase workspaceModel;
-		if (bundleModel.isFragmentModel())
-			workspaceModel = new WorkspaceBundleFragmentModel(PDEProject.getManifest(project), null);
-		else
-			workspaceModel = new WorkspaceBundlePluginModel(PDEProject.getManifest(project), null);
-
-		workspaceModel.load();
-
-		String header = workspaceModel.getBundleModel().getBundle().getHeader(SERVICE_COMPONENT_HEADER);
+		String header = bundleModel.getBundle().getHeader(SERVICE_COMPONENT_HEADER);
 		if (header == null) {
 			if (debug.isDebugging())
-				debug.trace(String.format("No Service-Component header in bundle: %s", workspaceModel)); //$NON-NLS-1$
+				debug.trace(String.format("No Service-Component header in bundle: %s", model.getUnderlyingResource().getFullPath())); //$NON-NLS-1$
 
 			return;
 		}
 
+		IProject project = model.getUnderlyingResource().getProject();
+		final HashSet<IFile> files = new HashSet<IFile>();
 		String[] elements = header.split("\\s*,\\s*"); //$NON-NLS-1$
 		for (String element : elements) {
 			if (element.isEmpty())
@@ -256,10 +313,9 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 			IPath path = new Path(element);
 			String lastSegment = path.lastSegment();
-			final HashSet<IFile> files = new HashSet<IFile>();
 			if (lastSegment.indexOf('*') >= 0) {
 				// wildcard path; get all entries in directory
-				final IPath folderPath = path.removeLastSegments(1);
+				IPath folderPath = path.removeLastSegments(1);
 				IFolder folder = PDEProject.getBundleRelativeFolder(project, folderPath);
 				if (!folder.exists()) {
 					if (debug.isDebugging())
@@ -270,7 +326,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 				final Filter filter;
 				try {
-					filter = FrameworkUtil.createFilter("(filename=" + sanitizeFilterValue(element) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+					filter = FrameworkUtil.createFilter("(filename=" + sanitizeFilterValue(lastSegment) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
 				} catch (InvalidSyntaxException e) {
 					// ignore
 					continue;
@@ -279,8 +335,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 				folder.accept(new IResourceVisitor() {
 					public boolean visit(IResource resource) throws CoreException {
 						if (resource.getType() == IResource.FILE) {
-							String pathStr = folderPath.append(resource.getName()).toString();
-							if (filter.matches(Collections.singletonMap("filename", pathStr))) //$NON-NLS-1$
+							if (filter.matches(Collections.singletonMap("filename", resource.getName()))) //$NON-NLS-1$
 								files.add((IFile) resource);
 
 							return false;
@@ -292,19 +347,21 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 			} else {
 				files.add(PDEProject.getBundleRelativeFile(project, new Path(element)));
 			}
+		}
 
-			// process each descriptor file
-			monitor.beginTask(project.getName(), files.size());
-			try {
-				for (IFile file : files) {
-					if (monitor.isCanceled())
-						throw new OperationCanceledException();
+		IJavaProject javaProject = JavaCore.create(project);
 
-					searchFile(file, new SubProgressMonitor(monitor, 1));
-				}
-			} finally {
-				monitor.done();
+		// process each descriptor file
+		monitor.beginTask(project.getName(), files.size());
+		try {
+			for (IFile file : files) {
+				if (monitor.isCanceled())
+					throw new OperationCanceledException();
+
+				searchFile(file, model, javaProject, new SubProgressMonitor(monitor, 1));
 			}
+		} finally {
+			monitor.done();
 		}
 	}
 
@@ -312,7 +369,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 		return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
 	}
 
-	private void searchFile(IFile file, IProgressMonitor monitor) throws CoreException {
+	private void searchFile(IFile file, IPluginModelBase model, IJavaProject javaProject, IProgressMonitor monitor) throws CoreException {
 		monitor.subTask(file.getName());
 
 		String content = null;
@@ -341,143 +398,318 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 			dsModel.setCharset(file.getCharset());
 			dsModel.load();
 
-			IDSComponent component = dsModel.getDSComponent();
-			if (component == null) {
-				if (debug.isDebugging())
-					debug.trace(String.format("No component definition found in file: %s", file.getFullPath())); //$NON-NLS-1$
-
-				return;
-			}
-
-			IDSImplementation impl = component.getImplementation();
-			if (impl == null) {
-				if (debug.isDebugging())
-					debug.trace(String.format("No component implementation found in file: %s", file.getFullPath())); //$NON-NLS-1$
-
-				return;
-			}
-
-			IJavaProject javaProject = JavaCore.create(file.getProject());
-
-			IType implClassType = null;
-			String implClassName = impl.getClassName();
-			if (implClassName != null)
-				implClassType = javaProject.findType(implClassName, monitor);
-
-			if ((searchElement != null && searchElement.getElementType() == IJavaElement.TYPE)
-					|| searchFor == IJavaSearchConstants.TYPE
-					|| searchFor == IJavaSearchConstants.CLASS
-					|| searchFor == IJavaSearchConstants.CLASS_AND_INTERFACE
-					|| searchFor == IJavaSearchConstants.CLASS_AND_ENUM
-					|| searchFor == IJavaSearchConstants.UNKNOWN) {
-				// match specific type references
-				if (matches(searchElement, searchPattern, implClassType))
-					reportMatch(requestor, impl.getDocumentAttribute(IDSConstants.ATTRIBUTE_IMPLEMENTATION_CLASS), file);
-			}
-
-			if ((searchElement != null && searchElement.getElementType() == IJavaElement.TYPE)
-					|| searchFor == IJavaSearchConstants.TYPE
-					|| searchFor == IJavaSearchConstants.CLASS
-					|| searchFor == IJavaSearchConstants.CLASS_AND_INTERFACE
-					|| searchFor == IJavaSearchConstants.CLASS_AND_ENUM
-					|| searchFor == IJavaSearchConstants.INTERFACE
-					|| searchFor == IJavaSearchConstants.INTERFACE_AND_ANNOTATION
-					|| searchFor == IJavaSearchConstants.UNKNOWN) {
-				IDSService service = component.getService();
-				if (service != null) {
-					IDSProvide[] provides = service.getProvidedServices();
-					if (provides != null) {
-						for (IDSProvide provide : provides) {
-							String ifaceName = provide.getInterface();
-							IType ifaceType = javaProject.findType(ifaceName, monitor);
-							if (matches(searchElement, searchPattern, ifaceType))
-								reportMatch(requestor, provide.getDocumentAttribute(IDSConstants.ATTRIBUTE_PROVIDE_INTERFACE), file);
-						}
-					}
-				}
-
-				IDSReference[] references = component.getReferences();
-				if (references != null) {
-					for (IDSReference reference : references) {
-						String ifaceName = reference.getReferenceInterface();
-						IType ifaceType = javaProject.findType(ifaceName, monitor);
-						if (matches(searchElement, searchPattern, ifaceType))
-							reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_INTERFACE), file);
-					}
-				}
-			}
-
-			if ((searchElement != null && searchElement.getElementType() == IJavaElement.METHOD)
-					|| searchFor == IJavaSearchConstants.METHOD
-					|| searchFor == IJavaSearchConstants.UNKNOWN) {
-				// match specific method references
-				String activate = component.getActivateMethod();
-				if (activate == null)
-					activate = "activate"; //$NON-NLS-1$
-
-				IMethod activateMethod = findActivateMethod(implClassType, activate, monitor);
-				if (matches(searchElement, searchPattern, activateMethod)) {
-					if (component.getActivateMethod() == null)
-						reportMatch(requestor, component, file);
-					else
-						reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_ACTIVATE), file);
-				}
-
-				String modified = component.getModifiedMethod();
-				if (modified != null) {
-					IMethod modifiedMethod = findActivateMethod(implClassType, modified, monitor);
-					if (matches(searchElement, searchPattern, modifiedMethod))
-						reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_MODIFIED), file);
-				}
-
-				String deactivate = component.getDeactivateMethod();
-				if (deactivate == null)
-					deactivate = "deactivate"; //$NON-NLS-1$
-
-				IMethod deactivateMethod = findDeactivateMethod(implClassType, deactivate, monitor);
-				if (matches(searchElement, searchPattern, deactivateMethod)) {
-					if (component.getDeactivateMethod() == null)
-						reportMatch(requestor, component, file);
-					else
-						reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_DEACTIVATE), file);
-				}
-
-				IDSReference[] references = component.getReferences();
-				if (references != null) {
-					for (IDSReference reference : references) {
-						String refIface = reference.getReferenceInterface();
-						if (refIface == null) {
-							if (debug.isDebugging())
-								debug.trace(String.format("No reference interface specified: %s", reference)); //$NON-NLS-1$
-
-							continue;
-						}
-
-						String bind = reference.getReferenceBind();
-						if (bind != null) {
-							IMethod bindMethod = findBindMethod(implClassType, bind, refIface, monitor);
-							if (matches(searchElement, searchPattern, bindMethod))
-								reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_BIND), file);
-						}
-
-						String unbind = reference.getReferenceUnbind();
-						if (unbind != null) {
-							IMethod unbindMethod = findBindMethod(implClassType, unbind, refIface, monitor);
-							if (matches(searchElement, searchPattern, unbindMethod))
-								reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_UNBIND), file);
-						}
-
-						String updated = reference.getXMLAttributeValue("updated"); //$NON-NLS-1$
-						if (updated != null) {
-							IMethod updatedMethod = findUpdatedMethod(implClassType, updated, monitor);
-							if (matches(searchElement, searchPattern, updatedMethod))
-								reportMatch(requestor, reference.getDocumentAttribute("updated"), file); //$NON-NLS-1$
-						}
-					}
-				}
-			}
+			searchModel(dsModel, javaProject, file, monitor);
 		} finally {
 			dsModel.dispose();
+		}
+	}
+
+	private void searchBundle(final IPluginModelBase model, IJavaProject javaProject, IProgressMonitor monitor) throws CoreException {
+		// note: there's no getBundleDescription().getBundle() so we have to parse the manifest ourselves
+		Map<String, String> headers = ManifestUtils.loadManifest(new File(model.getInstallLocation()));
+		String header = headers.get(SERVICE_COMPONENT_HEADER);
+		if (header == null) {
+			if (debug.isDebugging())
+				debug.trace(String.format("No Service-Component header in bundle: %s", model.getUnderlyingResource().getFullPath())); //$NON-NLS-1$
+
+			return;
+		}
+
+		File bundleRoot = new File(model.getInstallLocation());
+		IPackageFragmentRoot packageRoot = javaProject.getPackageFragmentRoot(bundleRoot.getAbsolutePath());
+		final HashSet<IStorage> files = new HashSet<IStorage>();
+
+		String[] elements = header.split("\\s*,\\s*"); //$NON-NLS-1$
+		for (String element : elements) {
+			if (element.isEmpty())
+				continue;
+
+			final IPath path = new Path(element).makeRelative();
+			String lastSegment = path.lastSegment();
+			if (lastSegment.indexOf('*') >= 0) {
+				// wildcard path; get all entries in directory
+				final Filter filter;
+				try {
+					filter = FrameworkUtil.createFilter("(filename=" + sanitizeFilterValue(lastSegment) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+				} catch (InvalidSyntaxException e) {
+					// ignore
+					continue;
+				}
+
+				IPath folderPath = path.removeLastSegments(1);
+
+				if (packageRoot.exists()) {
+					IJarEntryResource folderEntry = findJarEntry(packageRoot, folderPath);
+					if (folderEntry != null) {
+						IJarEntryResource[] fileEntries = findMatchingJarEntries(folderEntry, filter);
+						for (IJarEntryResource fileEntry : fileEntries) {
+							files.add(fileEntry);
+						}
+					}
+				} else {
+					File entryDir = folderPath.isEmpty() ? bundleRoot : new File(bundleRoot, folderPath.toString());
+					entryDir.listFiles(new FileFilter() {
+						public boolean accept(File pathname) {
+							if (filter.matches(Collections.singletonMap("filename", pathname.getName()))) { //$NON-NLS-1$
+								try {
+									files.add(new ExternalDescriptorFile(path, pathname.toURI().toURL()));
+								} catch (MalformedURLException e) {
+									if (debug.isDebugging())
+										debug.trace(String.format("Unable to create URL for file: %s", pathname), e); //$NON-NLS-1$
+								}
+							}
+
+							return false;
+						}
+					});
+				}
+			} else {
+				if (packageRoot.exists()) {
+					IJarEntryResource jarEntry = findJarEntry(packageRoot, path);
+					if (jarEntry != null)
+						files.add(jarEntry);
+				} else {
+					URL url;
+					try {
+						if (bundleRoot.isDirectory())
+							url = new File(bundleRoot, path.toString()).toURI().toURL();
+						else
+							url = new URL("jar:" + bundleRoot.toURI() + "!/" + path); //$NON-NLS-1$ //$NON-NLS-2$
+					} catch (IOException e) {
+						if (debug.isDebugging())
+							debug.trace(String.format("Error creating JAR URL for file '%s' in bundle '%s'.", path, bundleRoot), e); //$NON-NLS-1$
+
+						continue;
+					}
+
+					files.add(new ExternalDescriptorFile(path, url));
+				}
+			}
+		}
+
+		// process each descriptor file
+		monitor.beginTask(model.getBundleDescription().getSymbolicName(), files.size());
+		try {
+			for (IStorage file : files) {
+				if (monitor.isCanceled())
+					throw new OperationCanceledException();
+
+				searchFile(file, javaProject, new SubProgressMonitor(monitor, 1));
+			}
+		} finally {
+			monitor.done();
+		}
+	}
+
+	private IJarEntryResource[] findMatchingJarEntries(IJarEntryResource resource, Filter filter) {
+		ArrayList<IJarEntryResource> results = new ArrayList<IJarEntryResource>();
+		for (IJarEntryResource child : resource.getChildren()) {
+			if (child.isFile() && filter.matches(Collections.singletonMap("filename", child.getName()))) { //$NON-NLS-1$
+				results.add(child);
+			}
+		}
+
+		return results.toArray(new IJarEntryResource[results.size()]);
+	}
+
+	private IJarEntryResource findJarEntry(IPackageFragmentRoot packageRoot, IPath path) throws JavaModelException {
+		for (Object nonJavaResource : packageRoot.getNonJavaResources()) {
+			if (nonJavaResource instanceof IJarEntryResource) {
+				IJarEntryResource result = findJarEntry((IJarEntryResource) nonJavaResource, path);
+				if (result != null)
+					return result;
+			}
+		}
+
+		return null;
+	}
+
+	private IJarEntryResource findJarEntry(IJarEntryResource resource, IPath path) {
+		if (!resource.getName().equals(path.segment(0)))
+			return null;
+
+		if (path.segmentCount() == 1)
+			return resource;
+
+		if (resource.isFile())
+			return null;
+
+		for (IJarEntryResource child : resource.getChildren()) {
+			IJarEntryResource result = findJarEntry(child, path.removeFirstSegments(1));
+			if (result != null)
+				return result;
+		}
+
+		return null;
+	}
+
+	private void searchFile(IStorage file, IJavaProject javaProject, IProgressMonitor monitor) throws CoreException {
+		monitor.subTask(file.getName());
+
+		String content = null;
+		try {
+			ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
+			InputStream in = file.getContents();
+			try {
+				byte[] buf = new byte[4096];
+				int c;
+				while ((c = in.read(buf)) != -1) {
+					out.write(buf, 0, c);
+				}
+
+				content = out.toString("UTF-8"); //$NON-NLS-1$	// TODO check charset
+			} finally {
+				in.close();
+			}
+		} catch (IOException e) {
+			Activator.getDefault().getLog().log(new Status(IStatus.ERROR, Activator.PLUGIN_ID, String.format("Error loading component descriptor from URL: %s", file), e)); //$NON-NLS-1$
+		}
+
+		Document doc = new Document(content);
+		DSModel dsModel = new DSModel(doc, false);
+		try {
+			dsModel.setInstallLocation(file.getFullPath().toString());
+			dsModel.load();
+
+			searchModel(dsModel, javaProject, file, monitor);
+		} finally {
+			dsModel.dispose();
+		}
+	}
+
+	private void searchModel(DSModel dsModel, IJavaProject javaProject, Object matchElement, IProgressMonitor monitor) throws CoreException {
+		IDSComponent component = dsModel.getDSComponent();
+		if (component == null) {
+			if (debug.isDebugging())
+				debug.trace(String.format("No component definition found in file: %s", dsModel.getUnderlyingResource() == null ? dsModel.getInstallLocation() : dsModel.getUnderlyingResource().getFullPath())); //$NON-NLS-1$	// TODO de-uglify!
+
+			return;
+		}
+
+		IDSImplementation impl = component.getImplementation();
+		if (impl == null) {
+			if (debug.isDebugging())
+				debug.trace(String.format("No component implementation found in file: %s", dsModel.getUnderlyingResource() == null ? dsModel.getInstallLocation() : dsModel.getUnderlyingResource().getFullPath())); //$NON-NLS-1$	// TODO de-uglify!
+
+			return;
+		}
+
+		IType implClassType = null;
+		String implClassName = impl.getClassName();
+		if (implClassName != null)
+			implClassType = javaProject.findType(implClassName, monitor);
+
+		if ((searchElement != null && searchElement.getElementType() == IJavaElement.TYPE)
+				|| searchFor == IJavaSearchConstants.TYPE
+				|| searchFor == IJavaSearchConstants.CLASS
+				|| searchFor == IJavaSearchConstants.CLASS_AND_INTERFACE
+				|| searchFor == IJavaSearchConstants.CLASS_AND_ENUM
+				|| searchFor == IJavaSearchConstants.UNKNOWN) {
+			// match specific type references
+			if (matches(searchElement, searchPattern, implClassType))
+				reportMatch(requestor, impl.getDocumentAttribute(IDSConstants.ATTRIBUTE_IMPLEMENTATION_CLASS), matchElement);
+		}
+
+		if ((searchElement != null && searchElement.getElementType() == IJavaElement.TYPE)
+				|| searchFor == IJavaSearchConstants.TYPE
+				|| searchFor == IJavaSearchConstants.CLASS
+				|| searchFor == IJavaSearchConstants.CLASS_AND_INTERFACE
+				|| searchFor == IJavaSearchConstants.CLASS_AND_ENUM
+				|| searchFor == IJavaSearchConstants.INTERFACE
+				|| searchFor == IJavaSearchConstants.INTERFACE_AND_ANNOTATION
+				|| searchFor == IJavaSearchConstants.UNKNOWN) {
+			IDSService service = component.getService();
+			if (service != null) {
+				IDSProvide[] provides = service.getProvidedServices();
+				if (provides != null) {
+					for (IDSProvide provide : provides) {
+						String ifaceName = provide.getInterface();
+						IType ifaceType = javaProject.findType(ifaceName, monitor);
+						if (matches(searchElement, searchPattern, ifaceType))
+							reportMatch(requestor, provide.getDocumentAttribute(IDSConstants.ATTRIBUTE_PROVIDE_INTERFACE), matchElement);
+					}
+				}
+			}
+
+			IDSReference[] references = component.getReferences();
+			if (references != null) {
+				for (IDSReference reference : references) {
+					String ifaceName = reference.getReferenceInterface();
+					IType ifaceType = javaProject.findType(ifaceName, monitor);
+					if (matches(searchElement, searchPattern, ifaceType))
+						reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_INTERFACE), matchElement);
+				}
+			}
+		}
+
+		if ((searchElement != null && searchElement.getElementType() == IJavaElement.METHOD)
+				|| searchFor == IJavaSearchConstants.METHOD
+				|| searchFor == IJavaSearchConstants.UNKNOWN) {
+			// match specific method references
+			String activate = component.getActivateMethod();
+			if (activate == null)
+				activate = "activate"; //$NON-NLS-1$
+
+			IMethod activateMethod = findActivateMethod(implClassType, activate, monitor);
+			if (matches(searchElement, searchPattern, activateMethod)) {
+				if (component.getActivateMethod() == null)
+					reportMatch(requestor, component, matchElement);
+				else
+					reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_ACTIVATE), matchElement);
+			}
+
+			String modified = component.getModifiedMethod();
+			if (modified != null) {
+				IMethod modifiedMethod = findActivateMethod(implClassType, modified, monitor);
+				if (matches(searchElement, searchPattern, modifiedMethod))
+					reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_MODIFIED), matchElement);
+			}
+
+			String deactivate = component.getDeactivateMethod();
+			if (deactivate == null)
+				deactivate = "deactivate"; //$NON-NLS-1$
+
+			IMethod deactivateMethod = findDeactivateMethod(implClassType, deactivate, monitor);
+			if (matches(searchElement, searchPattern, deactivateMethod)) {
+				if (component.getDeactivateMethod() == null)
+					reportMatch(requestor, component, matchElement);
+				else
+					reportMatch(requestor, component.getDocumentAttribute(IDSConstants.ATTRIBUTE_COMPONENT_DEACTIVATE), matchElement);
+			}
+
+			IDSReference[] references = component.getReferences();
+			if (references != null) {
+				for (IDSReference reference : references) {
+					String refIface = reference.getReferenceInterface();
+					if (refIface == null) {
+						if (debug.isDebugging())
+							debug.trace(String.format("No reference interface specified: %s", reference)); //$NON-NLS-1$
+
+						continue;
+					}
+
+					String bind = reference.getReferenceBind();
+					if (bind != null) {
+						IMethod bindMethod = findBindMethod(implClassType, bind, refIface, monitor);
+						if (matches(searchElement, searchPattern, bindMethod))
+							reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_BIND), matchElement);
+					}
+
+					String unbind = reference.getReferenceUnbind();
+					if (unbind != null) {
+						IMethod unbindMethod = findBindMethod(implClassType, unbind, refIface, monitor);
+						if (matches(searchElement, searchPattern, unbindMethod))
+							reportMatch(requestor, reference.getDocumentAttribute(IDSConstants.ATTRIBUTE_REFERENCE_UNBIND), matchElement);
+					}
+
+					String updated = reference.getXMLAttributeValue("updated"); //$NON-NLS-1$
+					if (updated != null) {
+						IMethod updatedMethod = findUpdatedMethod(implClassType, updated, monitor);
+						if (matches(searchElement, searchPattern, updatedMethod))
+							reportMatch(requestor, reference.getDocumentAttribute("updated"), matchElement); //$NON-NLS-1$
+					}
+				}
+			}
 		}
 	}
 
@@ -821,14 +1053,14 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 		return pattern.matches(method);
 	}
 
-	private void reportMatch(ISearchRequestor requestor, IDocumentAttributeNode attr, IFile file) {
-		requestor.reportMatch(new Match(file, attr.getValueOffset(), attr.getValueLength()));
+	private void reportMatch(ISearchRequestor requestor, IDocumentAttributeNode node, Object element) {
+		requestor.reportMatch(new Match(element, node.getValueOffset(), node.getValueLength()));
 	}
 
-	private void reportMatch(ISearchRequestor requestor, IDocumentElementNode elem, IFile file) {
-		String prefix = elem.getNamespacePrefix();
-		int nameLen = prefix == null || prefix.isEmpty() ? elem.getXMLTagName().length() : prefix.length() + elem.getXMLTagName().length() + 1;
-		requestor.reportMatch(new Match(file, elem.getOffset() + 1, nameLen));
+	private void reportMatch(ISearchRequestor requestor, IDocumentElementNode node, Object element) {
+		String prefix = node.getNamespacePrefix();
+		int nameLen = prefix == null || prefix.isEmpty() ? node.getXMLTagName().length() : prefix.length() + node.getXMLTagName().length() + 1;
+		requestor.reportMatch(new Match(element, node.getOffset() + 1, nameLen));
 	}
 
 	public int estimateTicks(QuerySpecification specification) {
