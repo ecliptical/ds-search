@@ -18,7 +18,6 @@ import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
@@ -308,7 +307,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 		final HashSet<IFile> files = new HashSet<IFile>();
 		String[] elements = header.split("\\s*,\\s*"); //$NON-NLS-1$
 		for (String element : elements) {
-			if (element.isEmpty())
+			if (element.length() == 0)
 				continue;
 
 			IPath path = new Path(element);
@@ -421,7 +420,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 		String[] elements = header.split("\\s*,\\s*"); //$NON-NLS-1$
 		for (String element : elements) {
-			if (element.isEmpty())
+			if (element.length() == 0)
 				continue;
 
 			final IPath path = new Path(element).makeRelative();
@@ -1002,15 +1001,16 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 	}
 
 	private String[] resolveParameterTypes(IMethod method, int maxParams) throws JavaModelException {
-		String[] paramSigs = method.getParameterTypes();
-		paramSigs = Arrays.copyOf(method.getParameterTypes(), paramSigs.length);
+		String[] oldParamSigs = method.getParameterTypes();
+		String[] paramSigs = new String[oldParamSigs.length];
+		System.arraycopy(oldParamSigs, 0, paramSigs, 0, paramSigs.length);
 		for (int i = 0, n = Math.min(paramSigs.length, maxParams); i < n; ++i) {
 			paramSigs[i] = Signature.getTypeErasure(paramSigs[i]);
 			if (!method.isResolved()) {
 				String[][] resolvedParamTypes = method.getDeclaringType().resolveType(Signature.toString(paramSigs[i]));
 				if (resolvedParamTypes != null && resolvedParamTypes.length > 0) {
 					// TODO should we use all results??
-					paramSigs[i] = Signature.createTypeSignature(resolvedParamTypes[0][0].isEmpty() ? resolvedParamTypes[0][1] : String.format("%s.%s", resolvedParamTypes[0][0], resolvedParamTypes[0][1]), true); //$NON-NLS-1$
+					paramSigs[i] = Signature.createTypeSignature(resolvedParamTypes[0][0].length() == 0 ? resolvedParamTypes[0][1] : String.format("%s.%s", resolvedParamTypes[0][0], resolvedParamTypes[0][1]), true); //$NON-NLS-1$
 				}
 			}
 		}
@@ -1059,7 +1059,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 
 	private void reportMatch(ISearchRequestor requestor, IDocumentElementNode node, Object element) {
 		String prefix = node.getNamespacePrefix();
-		int nameLen = prefix == null || prefix.isEmpty() ? node.getXMLTagName().length() : prefix.length() + node.getXMLTagName().length() + 1;
+		int nameLen = prefix == null || prefix.length() == 0 ? node.getXMLTagName().length() : prefix.length() + node.getXMLTagName().length() + 1;
 		requestor.reportMatch(new Match(element, node.getOffset() + 1, nameLen));
 	}
 
@@ -1085,7 +1085,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 			this.pattern = pattern;
 			this.matchRule = matchRule & ~SearchPattern.R_ERASURE_MATCH;
 			this.ignoreMethodParams = ignoreMethodParams;
-			simple = Signature.getQualifier(pattern).isEmpty();
+			simple = Signature.getQualifier(pattern).length() == 0;
 		}
 
 		public boolean matches(IType type) {
