@@ -22,6 +22,10 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 
+import org.eclipse.core.filebuffers.FileBuffers;
+import org.eclipse.core.filebuffers.ITextFileBuffer;
+import org.eclipse.core.filebuffers.ITextFileBufferManager;
+import org.eclipse.core.filebuffers.LocationKind;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
@@ -56,6 +60,7 @@ import org.eclipse.jdt.ui.search.ISearchRequestor;
 import org.eclipse.jdt.ui.search.PatternQuerySpecification;
 import org.eclipse.jdt.ui.search.QuerySpecification;
 import org.eclipse.jface.text.Document;
+import org.eclipse.jface.text.IDocument;
 import org.eclipse.osgi.service.resolver.BundleDescription;
 import org.eclipse.pde.core.IBaseModel;
 import org.eclipse.pde.core.plugin.IPluginModelBase;
@@ -371,35 +376,25 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 	private void searchFile(IFile file, IPluginModelBase model, IJavaProject javaProject, IProgressMonitor monitor) throws CoreException {
 		monitor.subTask(file.getName());
 
-		String content = null;
+		ITextFileBufferManager manager = FileBuffers.getTextFileBufferManager();
+		manager.connect(file.getFullPath(), LocationKind.IFILE, null);
+		DSModel dsModel = null;
 		try {
-			ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
-			InputStream in = file.getContents();
-			try {
-				byte[] buf = new byte[4096];
-				int c;
-				while ((c = in.read(buf)) != -1) {
-					out.write(buf, 0, c);
-				}
+			ITextFileBuffer buf = manager.getTextFileBuffer(file.getFullPath(), LocationKind.IFILE);
+			if (buf != null) {
+				IDocument doc = buf.getDocument();
+				dsModel = new DSModel(doc, false);
+				dsModel.setUnderlyingResource(file);
+				dsModel.setCharset(file.getCharset());
+				dsModel.load();
 
-				content = out.toString(file.getCharset());
-			} finally {
-				in.close();
+				searchModel(dsModel, javaProject, file, monitor);
 			}
-		} catch (IOException e) {
-			Activator.getDefault().getLog().log(new Status(IStatus.ERROR, Activator.PLUGIN_ID, String.format("Error loading component descriptor file: %s", file.getFullPath()), e)); //$NON-NLS-1$
-		}
-
-		Document doc = new Document(content);
-		DSModel dsModel = new DSModel(doc, false);
-		try {
-			dsModel.setUnderlyingResource(file);
-			dsModel.setCharset(file.getCharset());
-			dsModel.load();
-
-			searchModel(dsModel, javaProject, file, monitor);
 		} finally {
-			dsModel.dispose();
+			if (dsModel != null)
+				dsModel.dispose();
+
+			manager.disconnect(file.getFullPath(), LocationKind.IFILE, null);
 		}
 	}
 
@@ -556,7 +551,7 @@ public class DescriptorQueryParticipant implements IQueryParticipant {
 					out.write(buf, 0, c);
 				}
 
-				content = out.toString("UTF-8"); //$NON-NLS-1$	// TODO check charset
+				content = out.toString("UTF-8"); //$NON-NLS-1$
 			} finally {
 				in.close();
 			}
